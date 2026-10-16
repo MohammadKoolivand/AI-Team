@@ -54,7 +54,7 @@ async function downloadZip(res,id){
 async function handler(req,res){
  try{
   const url=new URL(req.url||'/',`http://${HOST}:${PORT}`),pathname=url.pathname;
-  if(req.method==='GET'&&pathname==='/api/health')return send(res,200,{ok:true,version:'0.7.0-mvp'});
+  if(req.method==='GET'&&pathname==='/api/health')return send(res,200,{ok:true,version:'0.7.0-mvp',capabilities:{reviewedGitPublish:true}});
   validateOrigin(req);
   const actor=auth.authenticate(req);
   if(!['GET','HEAD','OPTIONS'].includes(req.method))res.once('finish',()=>{
@@ -99,6 +99,14 @@ async function handler(req,res){
     }catch(e){return send(res,200,{connected:false,model,modelInstalled:false,error:String(e.message||e)});}
   }
   if(req.method==='GET'&&pathname==='/api/agents')return send(res,200,{agents:ROLES,stages:STAGES});
+  if(pathname==='/api/portfolio/trash'&&req.method==='GET')return send(res,200,{projects:portfolio.snapshot(true).filter(p=>auth.can(actor,p.id))});
+  if(pathname==='/api/portfolio/cleanup-demo'&&req.method==='POST'){if(!actor.admin)throw Object.assign(Error('Administrator required'),{status:403});await portfolio.cleanupDemo();return send(res,200,{ok:true});}
+  const restorePath=pathname.match(/^\/api\/portfolio\/projects\/([a-f0-9-]{36})(?:\/tasks\/([a-f0-9-]{36}))?\/restore$/);
+  if(restorePath&&req.method==='POST'){if(restorePath[2])await portfolio.restoreTask(restorePath[1],restorePath[2]);else await portfolio.restoreProject(restorePath[1]);return send(res,200,{ok:true});}
+  const retryPath=pathname.match(/^\/api\/portfolio\/projects\/([a-f0-9-]{36})\/tasks\/([a-f0-9-]{36})\/retry$/);
+  if(retryPath&&req.method==='POST'){await portfolio.retryTask(retryPath[1],retryPath[2]);return send(res,200,{ok:true});}
+  const bulkPath=pathname.match(/^\/api\/portfolio\/projects\/([a-f0-9-]{36})\/tasks\/bulk$/);
+  if(bulkPath&&req.method==='POST')return send(res,201,{tasks:await portfolio.enqueue(bulkPath[1],await body(req))});
   const projectEdit=pathname.match(/^\/api\/portfolio\/projects\/([a-f0-9-]{36})$/);
   if(projectEdit&&req.method==='PATCH')return send(res,200,{project:await portfolio.updateProject(projectEdit[1],await body(req))});
   if(projectEdit&&req.method==='DELETE'){await portfolio.deleteProject(projectEdit[1]);return send(res,200,{ok:true});}
@@ -138,6 +146,7 @@ async function handler(req,res){
   const p=store.getProject(id);if(!p)return bad(res,404,'پروژه یافت نشد.');
   if(req.method==='GET'&&!sub)return send(res,200,{project:p});
   if(req.method==='POST'&&sub==='repo/import')return send(res,200,{project:await engine.importRepo(id,await body(req))});
+  if(req.method==='POST'&&sub==='repo/publish')return send(res,200,{project:await engine.publish(id)});
   if(req.method==='GET'&&sub==='repo')return send(res,200,{repository:await engine.repoInfo(id)});
   if(req.method==='GET'&&sub==='repo/patch'){const patch=await engine.approvedPatch(id);res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','Content-Disposition':`attachment; filename=teamforge-${id}.patch`});res.end(patch);return;}
   if(req.method==='GET'&&sub==='repo/diff')return send(res,200,{diff:await engine.repoFileDiff(id,url.searchParams.get('path')||'')});

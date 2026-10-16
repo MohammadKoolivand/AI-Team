@@ -3,7 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import {durableJSON,restoreInPlace} from './durable.mjs';
 import {validatePlan,proposePlan} from './planning.mjs';
-import {validateLocalSource} from './git.mjs';
+import {validateLocalSource,git} from './git.mjs';
+import {validatePublishRemote} from './publication.mjs';
 
 const uuid=()=>crypto.randomUUID();
 const stamp=()=>new Date().toISOString();
@@ -13,23 +14,23 @@ const stages=['analysis','backend','frontend','qa'];
 /** Organizational portfolio. Every work item maps to its OWN existing Engine run.
  * No shared global approval gate; the coding engine remains responsible for each task's approvals. */
 export class Portfolio {
- constructor(dataDir,store,engine){this.file=path.join(dataDir,'portfolio.json');this.store=store;this.engine=engine;this.state={organization:{id:uuid(),name:'Local organization'},projects:[]};this.queue=Promise.resolve();}
+ constructor(dataDir,store,engine){this.file=path.join(dataDir,'portfolio.json');this.store=store;this.engine=engine;this.state={organization:{id:uuid(),name:'Local organization'},projects:[]};this.queue=Promise.resolve();this.dispatching=false;this.projectLocks=new Map();}
  async init(){try{const data=JSON.parse(await fs.readFile(this.file,'utf8'));if(Array.isArray(data.projects))this.state=data;}catch(e){if(e.code!=='ENOENT')throw e;}this.state.organization||={id:uuid(),name:'Local organization'};for(const p of this.state.projects)if(p.plan?.status==='approving')p.plan.status='draft';await this.save();}
  async save(){await fs.mkdir(path.dirname(this.file),{recursive:true});await durableJSON(this.file,this.state);}
  async mutate(fn){const op=this.queue.then(async()=>{const backup=structuredClone(this.state);try{const result=fn();await this.save();return result;}catch(e){restoreInPlace(this.state,backup);throw e;}});this.queue=op.catch(()=>{});return op;}
  project(id){const p=this.state.projects.find(x=>x.id===id);if(!p)throw Error('پروژه سازمانی پیدا نشد.');return p;}
- snapshot(){
-  const enriched=this.state.projects.map(p=>({
+ snapshot(includeDeleted=false){
+  const enriched=this.state.projects.filter(p=>includeDeleted||!p.deletedAt).map(p=>({
    ...p,
    phases:p.phases.map(phase=>({
     ...phase,
     features:phase.features.map(feature=>({
      ...feature,
-     tasks:feature.tasks.map(t=>{
+     tasks:feature.tasks.filter(t=>includeDeleted||!t.deletedAt).map(t=>{
       const run=this.store.getProject(t.runId);
       const active=run?.tasks.find(s=>['running','awaiting_review','failed'].includes(s.status))||run?.tasks.find(s=>s.status==='pending');
       const paths=new Set(run?.tasks.flatMap(s=>s.revisions.flatMap(r=>r.changes.map(c=>c.path)))||[]);
-      const conflicts=p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).filter(other=>other.id!==t.id).flatMap(other=>{const peer=this.store.getProject(other.runId);const overlap=[...new Set(peer?.tasks.flatMap(s=>s.revisions.flatMap(r=>r.changes.map(c=>c.path))).filter(name=>paths.has(name))||[])];return overlap.length?[{taskId:other.id,title:other.title,files:overlap}]:[];});
+      const conflicts=p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).filter(other=>other.id!==t.id&&!other.deletedAt).flatMap(other=>{const peer=this.store.getProject(other.runId);const overlap=[...new Set(peer?.tasks.flatMap(s=>s.revisions.flatMap(r=>r.changes.map(c=>c.path))).filter(name=>paths.has(name))||[])];return overlap.length?[{taskId:other.id,title:other.title,files:overlap}]:[];});
       return {...t,conflicts,runStatus:run?.status||'unknown',stage:active?.id||'completed',stageStatus:active?.status||'completed',pipeline:run?.tasks.map(s=>({id:s.id,status:s.status,attempts:s.attempts}))||[]};
      })
     }))
@@ -37,13 +38,19 @@ export class Portfolio {
   }));
   return structuredClone(enriched);
  }
- async addProject({title,description='',team=[]}){const p={id:uuid(),organizationId:this.state.organization.id,title:required(title,'عنوان پروژه'),description:String(description).slice(0,3000),team:Array.isArray(team)?team.slice(0,30).map(x=>({id:uuid(),name:required(x.name,'نام عضو'),role:required(x.role,'نقش',35)})):[],phases:[],createdAt:stamp()};await this.mutate(()=>this.state.projects.push(p));return p;}
+ async addProject({title,description='',team=[],queueMode='parallel'}){const p={id:uuid(),queueMode:queueMode==='sequential'?'sequential':'parallel',organizationId:this.state.organization.id,title:required(title,'عنوان پروژه'),description:String(description).slice(0,3000),team:Array.isArray(team)?team.slice(0,30).map(x=>({id:uuid(),name:required(x.name,'نام عضو'),role:required(x.role,'نقش',35)})):[],phases:[],createdAt:stamp()};await this.mutate(()=>this.state.projects.push(p));return p;}
  async attachRepository(pid,source){
   const p=this.project(pid);
   if(p.repository)throw Error('مخزن پروژه قبلاً متصل شده است.');
   if(p.phases.some(ph=>ph.features.some(f=>f.tasks.length)))throw Error('برای امنیت نسخه‌بندی، مخزن Git را پیش از ایجاد نخستین تسک وصل کنید. یک پروژه جدید بسازید.');
-  const validated=await validateLocalSource(source);
-  const repo={kind:'local',path:validated.path,head:validated.head,sourceLabel:validated.sourceLabel,connectedAt:stamp()};
+  let repo;
+  if(source.kind==='git'){
+   if(process.env.TEAMFORGE_ALLOW_REMOTE_GIT!=='1')throw Error('Remote Git is disabled');
+   const url=validatePublishRemote(source.url),branch=source.branch||'develop';await git(['check-ref-format',`refs/heads/${branch}`]);
+   const refs=await git(['ls-remote','--exit-code',url,`refs/heads/${branch}`],{timeout:45000});
+   repo={kind:'git',url,branch,head:refs.split(/\s/)[0],sourceLabel:`${new URL(url).hostname} / ${branch}`,connectedAt:stamp()};
+  }else{const validated=await validateLocalSource(source);
+  repo={kind:'local',path:validated.path,head:validated.head,sourceLabel:validated.sourceLabel,connectedAt:stamp()};}
   await this.mutate(()=>{p.repository=repo;});
   return repo;
  }
@@ -56,11 +63,11 @@ export class Portfolio {
  async addPhase(pid,{title,description='',priority='medium',status='planned',plannedOrder=0}){const p=this.project(pid);if(!['low','medium','high'].includes(priority)||!['planned','active','completed'].includes(status)||!Number.isInteger(plannedOrder)||plannedOrder<0)throw Error('Invalid phase metadata');const phase={id:uuid(),title:required(title,'عنوان فاز'),description:String(description).slice(0,5000),priority,status,plannedOrder,features:[]};await this.mutate(()=>p.phases.push(phase));return phase;}
  async addFeature(pid,{phaseId,title,description='',businessRequirements='',acceptanceCriteria=[],priority='medium'}){const p=this.project(pid);const phase=p.phases.find(x=>x.id===phaseId);if(!phase)throw Error('فاز پیدا نشد.');if(!['low','medium','high'].includes(priority)||!Array.isArray(acceptanceCriteria)||acceptanceCriteria.some(x=>typeof x!=='string'||x.length>1000))throw Error('Invalid feature metadata');const feat={id:uuid(),title:required(title,'عنوان فیچر'),description:String(description).slice(0,5000),businessRequirements:String(businessRequirements).slice(0,5000),acceptanceCriteria,priority,tasks:[]};await this.mutate(()=>phase.features.push(feat));return feat;}
  async addTask(pid,{featureId,title,description,priority='medium',mode='demo',runner='builtin',dependencies=[],acceptanceCriteria=[]}){
-  const p=this.project(pid),feat=p.phases.flatMap(x=>x.features).find(x=>x.id===featureId);
+  const p=this.project(pid);if(p.deletedAt)throw Error('Project deleted');const feat=p.phases.flatMap(x=>x.features).find(x=>x.id===featureId);
   if(!feat)throw Error('فیچر پیدا نشد.');
   if(!['low','medium','high'].includes(priority)||!['demo','ollama'].includes(mode)||!['builtin','codex_cli'].includes(runner))throw Error('تنظیمات تسک معتبر نیست.');
   const clean=required(title,'عنوان تسک'),desc=required(description,'شرح تسک',5000);
-  const existing=p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks));
+  const existing=p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).filter(t=>!t.deletedAt);
   if(!Array.isArray(dependencies)||dependencies.length>100||new Set(dependencies).size!==dependencies.length||dependencies.some(id=>!existing.some(t=>t.id===id)))throw Error('وابستگی باید تسک موجود همین پروژه باشد.');
   if(!Array.isArray(acceptanceCriteria)||acceptanceCriteria.length>40||acceptanceCriteria.some(x=>typeof x!=='string'||!x.trim()||x.length>1000))throw Error('معیار پذیرش نامعتبر است.');
   // Existing Engine owns each work item's isolated workspace, agent state, reviews and human gates.
@@ -69,14 +76,14 @@ export class Portfolio {
   const run=await this.store.create({title:`${p.title} / ${clean}`,description:`Organization: ${p.title}\nFeature: ${feat.title}\nTask: ${clean}\n${desc}`,mode,runner});
   // Every work item gets a fresh, isolated Git worktree. Its own approvals and edits
   // never modify sibling tasks or the organization's source repository.
-  if(mode==='ollama'){
-   try{await this.engine.importRepo(run.id,{kind:'local',path:p.repository.path});}
+  if(mode==='ollama'&&p.queueMode!=='sequential'){
+   try{await this.engine.importRepo(run.id,p.repository);}
    catch(e){await this.store.deleteDraft(run.id);throw e;}
   }
-  await this.store.mutate(run.id,x=>{x.organizationProjectId=pid;x.autoStart=mode==='ollama';x.dependsOnRuns=dependencies.map(id=>existing.find(t=>t.id===id).runId);x.acceptanceCriteria=acceptanceCriteria;x.filePolicy=p.filePolicy;x.assignedReviewers=Object.fromEntries(p.team.filter(m=>m.userId).map(m=>[m.role,m.userId]));});
+  await this.store.mutate(run.id,x=>{x.organizationProjectId=pid;x.autoStart=mode==='ollama';x.queueManaged=p.queueMode==='sequential';x.dependsOnRuns=dependencies.map(id=>existing.find(t=>t.id===id).runId);x.acceptanceCriteria=acceptanceCriteria;x.filePolicy=p.filePolicy;x.assignedReviewers=Object.fromEntries(p.team.filter(m=>m.userId).map(m=>[m.role,m.userId]));});
   const t={id:uuid(),dependencies,acceptanceCriteria,title:clean,description:desc,priority,runId:run.id,mode,createdBy:'مدیر پروژه',createdAt:stamp()};
   await this.mutate(()=>feat.tasks.push(t));
-  if(mode==='ollama'&&dependencies.every(id=>this.store.getProject(existing.find(t=>t.id===id).runId)?.status==='completed')){
+  if(mode==='ollama'&&p.queueMode!=='sequential'&&dependencies.every(id=>this.store.getProject(existing.find(t=>t.id===id).runId)?.status==='completed')){
    try{await this.engine.start(run.id);}catch(e){await this.store.event(run.id,'system','error',`Start failed: ${String(e.message||e)}`);}
   }
   return t;
@@ -86,7 +93,34 @@ export class Portfolio {
   if(input.title!==undefined)p.title=required(input.title,'عنوان پروژه');if(input.description!==undefined)p.description=required(input.description,'شرح پروژه',5000);return structuredClone(p);});
  }
  async deleteProject(pid){
-  return this.mutate(()=>{const p=this.project(pid);if(p.phases.some(ph=>ph.features.some(f=>f.tasks.length)))throw Error('Remove tasks first; execution history is preserved separately');this.state.projects=this.state.projects.filter(x=>x.id!==pid);});
+  const p=this.project(pid);await this.mutate(()=>{p.deletedAt=stamp();});
+  for(const t of p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)))await this.engine.archive(t.runId);
+ }
+ async restoreProject(pid){const p=this.project(pid);for(const t of p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).filter(t=>!t.deletedAt))await this.engine.restore(t.runId);await this.mutate(()=>{p.deletedAt=null;});}
+ async restoreTask(pid,id){const p=this.project(pid);if(p.deletedAt)throw Error('ابتدا پروژه را بازیابی کنید.');const t=p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).find(t=>t.id===id);if(!t)throw Error('Task not found');await this.engine.restore(t.runId);await this.mutate(()=>{t.deletedAt=null;});}
+ async retryTask(pid,id){const p=this.project(pid),t=p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).find(t=>t.id===id&&!t.deletedAt);if(!t||p.deletedAt)throw Error('Task not found');
+  const run=this.store.getProject(t.runId);if(!run||this.engine.active.has(run.id)||!['failed','interrupted','paused','draft'].includes(run.status))throw Error('Task cannot be retried now');
+  if(p.queueMode!=='sequential')return this.engine.start(run.id);
+  await this.store.mutate(run.id,x=>{x.autoStart=true;x.queueError=null;x.status=x.repository?'interrupted':'draft';});
+ }
+ async cleanupDemo(){for(const p of this.state.projects.filter(p=>p.isDemo&&!p.deletedAt))await this.deleteProject(p.id);for(const run of this.store.state.projects.filter(p=>p.mode==='demo'&&!p.archivedAt))await this.engine.archive(run.id);}
+ async enqueue(pid,input){
+  const previous=this.projectLocks.get(pid)||Promise.resolve();const op=previous.then(()=>this.enqueueLocked(pid,input));this.projectLocks.set(pid,op.catch(()=>{}));return op;
+ }
+ async enqueueLocked(pid,{tasks}){
+  const p=this.project(pid);if(p.deletedAt||!p.repository||p.isDemo)throw Error('ابتدا Git پروژهٔ واقعی را متصل کنید.');
+  if(!Array.isArray(tasks)||!tasks.length||tasks.length>100)throw Error('هر بار ۱ تا ۱۰۰ تسک وارد کنید؛ تعداد کل صف محدود نیست.');
+  const specs=tasks.map(t=>typeof t==='string'?{title:required(t,'عنوان تسک'),description:required(t,'شرح تسک',5000)}:{title:required(t.title,'عنوان تسک'),description:required(t.description,'شرح تسک',5000)});
+  if(p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).filter(t=>!t.deletedAt).length&&p.queueMode!=='sequential')throw Error('برای صف ترتیبی پروژهٔ جدید بسازید.');
+  const phase=p.phases[0]||{id:uuid(),title:'توسعه پروژه',features:[]},feature=phase.features[0]||{id:uuid(),title:'لیست کارها',tasks:[]},created=[];
+  try{
+   for(const spec of specs){const run=await this.store.create({title:`${p.title} / ${spec.title}`,description:`Project: ${p.title}\n${p.description}\nTask: ${spec.description}`,mode:'ollama'});
+    created.push({...spec,id:uuid(),runId:run.id,mode:'ollama',priority:'medium',dependencies:[],acceptanceCriteria:[],createdAt:stamp()});
+    await this.store.mutate(run.id,x=>{x.organizationProjectId=pid;x.autoStart=true;x.queueManaged=true;x.filePolicy=p.filePolicy;x.assignedReviewers=Object.fromEntries(p.team.filter(m=>m.userId).map(m=>[m.role,m.userId]));});
+   }
+   await this.mutate(()=>{if(p.deletedAt)throw Error('Project deleted');p.queueMode='sequential';if(!p.phases.length)p.phases.push(phase);if(!phase.features.length)phase.features.push(feature);feature.tasks.push(...created);});
+  }catch(e){for(const t of created)await this.store.deleteDraft(t.runId);throw e;}
+  return created;
  }
  async updateItem(pid,kind,id,input){
   return this.mutate(()=>{
@@ -104,17 +138,19 @@ export class Portfolio {
   });
  }
  async deleteItem(pid,kind,id){
-  return this.mutate(()=>{
+  const task=kind==='tasks'?this.project(pid).phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).find(t=>t.id===id):null;
+  await this.mutate(()=>{
    const p=this.project(pid);const parent=kind==='phases'?p:kind==='features'?p.phases.find(ph=>ph.features.some(f=>f.id===id)):p.phases.flatMap(ph=>ph.features).find(f=>f.tasks.some(t=>t.id===id));
    if(!parent||!parent[kind]?.some(x=>x.id===id))throw Error('Item not found');
    const item=parent[kind].find(x=>x.id===id);
-   if(item.features?.length||item.tasks?.length)throw Error('Remove child items first');
+   if(item.features?.length||item.tasks?.some(t=>!t.deletedAt))throw Error('Remove child items first');
    if(kind==='tasks'){
-    if(this.store.getProject(item.runId)?.status!=='draft')throw Error('Only draft tasks can be removed');
-    if(p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).some(t=>t.dependencies?.includes(id)))throw Error('Task has dependents');
+    
+    if(p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).some(t=>!t.deletedAt&&t.dependencies?.includes(id)))throw Error('Task has dependents');
    }
-   parent[kind]=parent[kind].filter(x=>x.id!==id);
+   if(kind==='tasks')item.deletedAt=stamp();else parent[kind]=parent[kind].filter(x=>x.id!==id);
   });
+  if(task)await this.engine.archive(task.runId);
  }
  async draftPlan(pid,input,actor){
   const p=this.project(pid),plan=input?validatePlan(input):await this.engine.withAgentSlot(()=>proposePlan(p),pid);
@@ -131,8 +167,8 @@ export class Portfolio {
    for(const phase of content.phases){const ph={id:uuid(),title:phase.title,description:phase.description,features:[]};phases.push(ph);
     for(const feature of phase.features){const f={id:uuid(),title:feature.title,description:feature.description,tasks:[]};ph.features.push(f);
      for(const task of feature.tasks){const run=await this.store.create({title:`${p.title} / ${task.title}`,description:task.description,mode:p.repository&&!p.isDemo?'ollama':'demo'});const t={...task,id:uuid(),runId:run.id,mode:run.mode,createdAt:stamp(),createdBy:actor,dependencies:task.dependencies.map(i=>created[i].id)};created.push(t);f.tasks.push(t);
-      if(run.mode==='ollama')await this.engine.importRepo(run.id,{kind:'local',path:p.repository.path});
-      await this.store.mutate(run.id,x=>{x.organizationProjectId=pid;x.acceptanceCriteria=task.acceptanceCriteria;x.filePolicy=p.filePolicy;x.assignedReviewers=Object.fromEntries(p.team.filter(m=>m.userId).map(m=>[m.role,m.userId]));x.dependsOnRuns=task.dependencies.map(i=>created[i].runId);});
+      if(run.mode==='ollama'&&p.queueMode!=='sequential')await this.engine.importRepo(run.id,p.repository);
+      await this.store.mutate(run.id,x=>{x.organizationProjectId=pid;x.queueManaged=p.queueMode==='sequential';x.autoStart=p.queueMode==='sequential'&&run.mode==='ollama';x.acceptanceCriteria=task.acceptanceCriteria;x.filePolicy=p.filePolicy;x.assignedReviewers=Object.fromEntries(p.team.filter(m=>m.userId).map(m=>[m.role,m.userId]));x.dependsOnRuns=task.dependencies.map(i=>created[i].runId);});
      }
     }
    }
@@ -140,15 +176,28 @@ export class Portfolio {
   }catch(e){for(const t of created)await this.store.deleteDraft(t.runId);await this.mutate(()=>{p.plan.status='draft';});throw e;}
  }
  async dispatch(){
-  for(const p of this.state.projects)for(const t of p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks))){
-   const run=this.store.getProject(t.runId);
-   if(!run||run.mode!=='ollama'||!['draft','interrupted'].includes(run.status)||!run.autoStart)continue;
-   if((run.dependsOnRuns||[]).some(id=>this.store.getProject(id)?.status!=='completed'))continue;
-   try{await this.engine.start(run.id);}catch(e){if(!this.engine.active.has(run.id))await this.store.event(run.id,'system','warning',String(e.message));}
-  }
+  if(this.dispatching)return;this.dispatching=true;
+  try{for(const p of this.state.projects.filter(p=>!p.deletedAt)){
+   const tasks=p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).filter(t=>!t.deletedAt).sort((a,b)=>this.store.state.projects.findIndex(r=>r.id===a.runId)-this.store.state.projects.findIndex(r=>r.id===b.runId));
+   for(const t of tasks){
+    const run=this.store.getProject(t.runId);if(!run||run.archivedAt)continue;
+    if(p.queueMode==='sequential'&&run.status==='completed'){
+     if(process.env.TEAMFORGE_AUTO_PUBLISH==='1'&&run.mode==='ollama'&&run.publication?.status!=='pushed')break;
+     continue;
+    }
+    if(run.mode!=='ollama'||!['draft','interrupted'].includes(run.status)||!run.autoStart){if(p.queueMode==='sequential'&&run.status!=='cancelled')break;continue;}
+    if((run.dependsOnRuns||[]).some(id=>this.store.getProject(id)?.status!=='completed')){if(p.queueMode==='sequential')break;continue;}
+    try{
+     if(!run.repository)await this.engine.importRepo(run.id,p.repository);
+     if(p.deletedAt||t.deletedAt||this.store.getProject(run.id)?.archivedAt)continue;
+     await this.engine.start(run.id);
+    }catch(e){await this.store.mutate(run.id,x=>{if(!x.archivedAt){x.status='failed';x.queueError=String(e.message);}});await this.store.event(run.id,'system','warning',String(e.message));}
+    if(p.queueMode==='sequential')break;
+   }
+  }}finally{this.dispatching=false;}
  }
  async seed(){
-  const old=this.state.projects.find(x=>x.demoKey==='employee-requests');
+  const old=this.state.projects.find(x=>x.demoKey==='employee-requests'&&!x.deletedAt);
   if(old)return {projectId:old.id,reused:true};
   const project=await this.addProject({title:'سامانه مدیریت درخواست‌های کارکنان',description:'پروژه آزمایشی برای نشان‌دادن اجرای هم‌زمان تحلیل، بک‌اند، فرانت‌اند و QA روی تسک‌های مستقل.',team:[{name:'نازنین',role:'analysis'},{name:'علی',role:'backend'},{name:'سارا',role:'frontend'},{name:'پیمان',role:'qa'}]});
   await this.mutate(()=>{project.demoKey='employee-requests';project.isDemo=true;});

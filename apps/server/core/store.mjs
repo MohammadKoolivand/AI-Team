@@ -30,7 +30,7 @@ export class Store {
     }
     await this.save();
   }
-  getProjects(){return clone(this.state.projects.map(({id,title,description,mode,runner,status,createdAt,tasks,repository})=>({id,title,description,mode,runner,status,createdAt,repository,tasks:tasks.map(({id,title,status,agent,attempts})=>({id,title,status,agent,attempts}))})).reverse());}
+  getProjects(){return clone(this.state.projects.filter(p=>!p.archivedAt).map(({id,title,description,mode,runner,status,createdAt,tasks,repository})=>({id,title,description,mode,runner,status,createdAt,repository,tasks:tasks.map(({id,title,status,agent,attempts})=>({id,title,status,agent,attempts}))})).reverse());}
   getProject(id){const p=this.state.projects.find(x=>x.id===id);return p?clone(p):null;}
   async save(){await durableJSON(this.file,this.state);}
   async mutate(id,fn){

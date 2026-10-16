@@ -65,12 +65,14 @@ export async function importRepository(dataDir,id,source){
   origin=source.url;sourceLabel=`git: ${new URL(origin).hostname}`;
  }
  try{
-  await git(['clone','--no-local','--no-hardlinks','--no-checkout','--',origin,repo],{timeout:120000});
+  if(source.branch)await git(['check-ref-format',`refs/heads/${source.branch}`]);
+  await git(['clone',...(source.branch?['--branch',source.branch]:[]),'--no-local','--no-hardlinks','--no-checkout','--',origin,repo],{timeout:120000});
   const {head,initializedEmpty}=await resolveImportedHead(repo,{initializeEmpty:source.initializeEmpty===true});
   const branch=`teamforge/${id.slice(0,12)}`;
   await git(['-C',repo,'worktree','add','-b',branch,'--',workspace,head],{timeout:120000});
   // Do not allow a workspace to contain symlinks with a path to outside the repository.
-  return{repo,workspace,head,branch,sourceLabel,kind:source.kind,initializedEmpty};
+  const publishRemote=source.kind==='git'?origin:await git(['-C',origin,'remote','get-url','origin']).catch(()=>null);
+  return{repo,workspace,head,branch,sourceLabel,kind:source.kind,initializedEmpty,publishRemote};
  }catch(e){await fs.rm(repo,{recursive:true,force:true}).catch(()=>{});await fs.rm(workspace,{recursive:true,force:true}).catch(()=>{});throw e;}
 }
 export async function gitSummary(root){

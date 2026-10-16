@@ -1,3 +1,5 @@
+import {prepareReviewedCommit,pushReviewedCommit,publicationBranch,validatePublishRemote} from './publication.mjs';
+import {git} from './git.mjs';
 import {hasImplementationChanges,stageHasImplementation} from './review-policy.mjs';
 import fs from 'node:fs/promises';
 import {createReadStream} from 'node:fs';
@@ -63,12 +65,21 @@ export class Engine{
     }
   }
   workspace(id){return path.join(this.store.dataDir,'workspaces',id);}
+  async archive(id){return this.exclusive(id,async()=>{
+    const p=this.store.getProject(id);if(!p||p.archivedAt)return;
+    this.controllers.get(id)?.abort();
+    await this.store.mutate(id,x=>{x.archivedAt=now();x.statusBeforeArchive=x.status;x.autoStart=false;if(x.status!=='completed')x.status='cancelled';});
+  });}
+  async restore(id){return this.exclusive(id,async()=>{
+    if(this.active.has(id))throw Error('کمی صبر کنید تا اجرای لغوشده متوقف شود.');
+    await this.store.mutate(id,x=>{if(!x.archivedAt)return;x.archivedAt=null;x.status=x.statusBeforeArchive==='running'?'interrupted':x.statusBeforeArchive||'draft';x.autoStart=x.status==='draft';});
+  });}
   async importRepo(id,source){
     const p=this.store.getProject(id);
     if(!p||p.status!=='draft'||p.repository)throw Error('Import فقط برای پروژه تازه و بدون منبع مجاز است.');
     if(p.mode!=='ollama')throw Error('برای توسعه ریپازیتوری واقعی حالت Ollama را انتخاب کنید.');
     const repo=await importRepository(this.store.dataDir,id,source);
-    await this.store.mutate(id,x=>{x.repository={head:repo.head,branch:repo.branch,kind:repo.kind,sourceLabel:repo.sourceLabel,initializedEmpty:repo.initializedEmpty,importedAt:now()};});
+    await this.store.mutate(id,x=>{x.repository={head:repo.head,branch:repo.branch,kind:repo.kind,sourceLabel:repo.sourceLabel,initializedEmpty:repo.initializedEmpty,publishRemote:repo.publishRemote,importedAt:now()};});
     await this.store.event(id,'system','success',`Worktree created on ${repo.branch}, base ${repo.head.slice(0,12)}`);
     return this.store.getProject(id);
   }
@@ -88,9 +99,39 @@ export class Engine{
     const names=[...new Set(p.tasks.flatMap(t=>t.revisions.flatMap(r=>r.changes.map(c=>c.path))))];
     const patches=[];for(const name of names)patches.push(await gitDiff(this.workspace(id),name));return patches.join('\n');
   }
+  publish(id){return this.exclusive(id,()=>this.publishLocked(id));}
+  async publishLocked(id){
+    const p=this.store.getProject(id),branch=p?.publication?.branch||publicationBranch();
+    if(p?.publication?.status==='pushed')return p;
+    try{
+      if(p?.archivedAt||p?.mode!=='ollama'||!p.repository||p.status!=='completed'||!p.tasks.every(t=>t.status==='approved'))throw Error('انتشار فقط پس از تأیید انسانی همه مراحل و QA مجاز است.');
+      if(p.tasks.some(t=>['backend','frontend'].includes(t.id)&&!stageHasImplementation(t)))throw Error('مرحلهٔ پیاده‌سازی بدون کد قابل انتشار نیست.');
+      const qa=p.tasks.find(t=>t.id==='qa'),revision=qa?.revisions.at(-1);
+      if(!revision?.workspaceHash||revision.workspaceHash!==await this.revisionHash(id))throw Error('خروجی پس از تأیید QA تغییر کرده است؛ انتشار مجاز نیست.');
+      if(qa.checks?.some(c=>c.status==='failed'))throw Error('تست ناموفق وجود دارد؛ انتشار مجاز نیست.');
+      let remote=p.repository.publishRemote;
+      if(!remote&&p.repository.kind==='git')remote=await git(['-C',this.workspace(id),'remote','get-url','origin']);
+      validatePublishRemote(remote);
+      const paths=[...new Set(p.tasks.flatMap(t=>t.revisions.flatMap(r=>r.changes.map(c=>c.path))))];
+      const commit=await prepareReviewedCommit(this.workspace(id),{paths,branch,previousCommit:p.publication?.commit,message:`TeamForge: ${p.title} (QA approved)\n\nExecution: ${id}\nQA revision: ${revision.id}`});
+      await this.store.mutate(id,x=>{x.publication={status:'pushing',branch,commit,at:now()};});
+      if(revision.workspaceHash!==await this.revisionHash(id))throw Error('Workspace changed during publication');
+      await pushReviewedCommit(this.workspace(id),{remote,branch,commit});
+      await this.store.mutate(id,x=>{x.publication={...x.publication,status:'pushed',pushedAt:now(),error:null};});
+      await this.store.event(id,'system','success',`Commit ${commit.slice(0,12)} pushed to ${branch}`);
+    }catch(e){
+      await this.store.mutate(id,x=>{x.publication={...x.publication,status:'failed',branch,error:errorText(e),at:now()};});
+      await this.store.event(id,'system','warning',`انتشار در Git ناموفق بود: ${errorText(e)}`);
+    }
+    return this.store.getProject(id);
+  }
   async startLocked(id){
     const p=this.store.getProject(id);
-    if(!p)throw Error('پروژه وجود ندارد.');
+    if(!p||p.archivedAt)throw Error('پروژه وجود ندارد یا حذف شده است.');
+    if(p.queueManaged){
+      const earlier=this.store.state.projects.slice(0,this.store.state.projects.findIndex(x=>x.id===id)).filter(x=>x.organizationProjectId===p.organizationProjectId&&x.queueManaged&&!x.archivedAt&&x.status!=='cancelled');
+      if(earlier.some(x=>x.status!=='completed'||process.env.TEAMFORGE_AUTO_PUBLISH==='1'&&x.publication?.status!=='pushed'))throw Error('تسک‌های قبلی صف هنوز تکمیل و منتشر نشده‌اند.');
+    }
     if(p.mode==='ollama'&&!p.repository)throw Error('Real mode requires an imported Git Workspace repository.');
     if((p.dependsOnRuns||[]).some(dep=>this.store.getProject(dep)?.status!=='completed'))throw Error('Task dependencies are not completed.');
     if(this.active.has(id))throw Error('ایجنت در حال کار است.');
@@ -138,7 +179,7 @@ export class Engine{
   }
   async reviewLocked(id,taskId,{revisionId,action,comment='',filePath=null,line=null,reviewer='بازبین انسانی'}){
     const p=this.store.getProject(id),t=p?.tasks.find(t=>t.id===taskId);
-    if(!t||t.status!=='awaiting_review'||p.status!=='awaiting_review')throw Error('این مرحله برای تأیید آماده نیست.');
+    if(p?.archivedAt||!t||t.status!=='awaiting_review'||p.status!=='awaiting_review')throw Error('این مرحله برای تأیید آماده نیست.');
     const earlierEmpty=p.mode==='ollama'&&p.tasks.slice(0,p.tasks.findIndex(s=>s.id===taskId)).find(s=>['backend','frontend'].includes(s.id)&&s.status==='approved'&&!stageHasImplementation(s));
     if(earlierEmpty)throw Error(`مرحلهٔ «${earlierEmpty.title}» قبلاً بدون کد تأیید شده است؛ ابتدا همان مرحله را بازگشایی کنید.`);
     if(action==='approve'&&p.mode==='ollama'&&['backend','frontend'].includes(taskId)&&!stageHasImplementation(t))throw Error('این مرحله تغییر اجرایی ندارد و قابل تأیید نیست؛ اجرای اصلاح را درخواست کنید.');
@@ -162,6 +203,7 @@ export class Engine{
     });
     await this.store.event(id,t.agent,action==='approve'?'success':'warning',action==='approve'?`مرحله «${t.title}» توسط انسان تأیید شد.`:`مرحله «${t.title}» با نظر بازبین برگشت داده شد: ${comment.slice(0,180)}`);
     const latest=this.store.getProject(id);
+    if(latest.status==='completed'&&latest.mode==='ollama'&&latest.repository&&process.env.TEAMFORGE_AUTO_PUBLISH==='1')return this.publishLocked(id);
     if(latest.status==='running')void this.continueAfterReview(id);
     return latest;
   }

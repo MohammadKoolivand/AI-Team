@@ -219,3 +219,19 @@ Read [architecture](docs/ARCHITECTURE.md), [security limits](docs/SECURITY.md), 
 [implementation/test report](docs/IMPLEMENTATION_REPORT.md) before using private code.
 The [original v0.6 README](docs/README-v0.6.md) is preserved as historical reference;
 its unauthenticated/CLI instructions are superseded by this README.
+
+### Commit and push after QA approval
+
+Set `TEAMFORGE_AUTO_PUBLISH=1` and `TEAMFORGE_PUBLISH_BRANCH=develop` in `.env`, then restart the server. Every real Git execution publishes only after all four human approvals, including final QA. The current installation enables this as requested. Existing completed executions are not published on startup; use the dashboard Commit/Push retry button.
+
+Publication creates a commit from the reviewed files using a private Git index and pushes its SHA to `refs/heads/develop`. It preserves the isolated worktree HEAD/index and the original source repository. Commit identity defaults to `TeamForge <workspace@teamforge.invalid>`; configure `TEAMFORGE_GIT_AUTHOR_NAME` and `TEAMFORGE_GIT_AUTHOR_EMAIL` for your identity. HTTPS authentication uses the server host's existing Git credential helper; passwords/tokens are not stored in the app. Local imports capture the source repository's HTTPS origin when imported. Older local imports without a captured origin must be reimported.
+
+Push uses normal fast-forward rules: it never forces, merges, or overwrites concurrent commits. Authentication, branch protection, or divergent history can reject publication; the dashboard and event log retain the error and commit SHA for retry. Resolve divergence explicitly before retrying. Publication failure does not erase QA approval. Skipped checks remain skipped; human QA approval is still required. Changes after the approved snapshot or outside reviewed paths block publication.
+
+For github.com publication, TeamForge uses an already authenticated GitHub CLI credential helper when `gh auth status` succeeds, otherwise the existing Git credential helpers. No credentials are copied into the app. A GitHub 403 still requires write access to the target repository in that login/token.
+
+### Project queue and recoverable deletion
+
+On `/portfolio`, create a project, connect an HTTPS repository on its existing `develop` branch (or an allowed local Git folder), then enter tasks in the bulk box: one task per line, optionally `Title | full description`. Up to 100 tasks per submission; repeat submissions to extend the queue. Phase/feature structure is created automatically when needed. New projects created through the board use a sequential queue. Each task takes a fresh isolated source snapshot only when its turn starts. Human approval is required at every stage. When auto-publication is enabled, the next task waits for the previous task to be pushed successfully. Failed tasks require an explicit retry; failed publication uses the review dashboard retry button. Legacy parallel projects retain their behavior.
+
+Delete buttons archive projects/tasks and stop removed executions; no source files, remote branches, commits, or review history are removed. The Deleted/Restore panel restores items. Tasks with active dependents must have those dependents removed first. Deleted projects are excluded from dispatch and deleted runs from the execution list. Demo cleanup only archives explicitly marked demo projects and demo-mode runs.

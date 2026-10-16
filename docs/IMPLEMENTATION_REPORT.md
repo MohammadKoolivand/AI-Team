@@ -268,3 +268,15 @@ the local TeamForge dev launcher was gracefully restarted. API and web listeners
 are ready on 8787 and 3000 with the new code. Accounts, projects and review history
 were retained. The human still explicitly chooses to reopen the legacy empty
 backend stage; no approval/reopen identity was impersonated by the agent.
+
+## Reviewed Git publication
+
+Added opt-in publication after final human QA approval, targeting develop in this installation. Private-index commit construction preserves the worktree and original source; persistent commit SHA supports retries without duplicate commits. HTTPS only, existing Git credentials, normal non-force push, hash and approved-path guards; manager/admin retry endpoint and dashboard status. Automatic publication does not run retroactively at startup. Temporary bare-remote tests exercise actual commits/pushes and rejection of concurrent remote history; no live GitHub write was used for verification.
+
+Validation: 39/39 Node tests passed with loopback access, and TypeScript check passed. Publication integration test used a temporary local bare remote through a fixture-only HTTPS URL rewrite; no production GitHub push occurred during testing.
+
+## Portfolio queue and recoverable deletion
+
+Added sequential project queues, bulk task entry, lazy Git import at dispatch (HTTPS develop supported), queue guards against manual bypass, retry and publication blocking, delete/archive of active and draft tasks, project cascade archive, restore UI/API, and scoped demo cleanup. Existing parallel projects remain compatible. Seeded demo project and its four runs were archived in the user's installation; real execution history and published commits were retained. Full suite: 40 tests passed; subsequent HTTP authorization and queue tests passed after final changes. TypeScript validation passed. Queue tests use deterministic fixture agent output, not a live model claim.
+
+Production Next.js build passed using isolated `.next-queue-check` output to preserve the running development server.

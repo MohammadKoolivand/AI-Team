@@ -30,6 +30,10 @@ test('HTTP authentication, project isolation, assigned-role reviews, audit and S
   const phase=(await request(`/api/portfolio/projects/${project.id}/phases`,{method:'POST',body:{title:'Phase'}})).value.item;
   const feature=(await request(`/api/portfolio/projects/${project.id}/features`,{method:'POST',body:{phaseId:phase.id,title:'Feature'}})).value.item;
   const task=(await request(`/api/portfolio/projects/${project.id}/tasks`,{method:'POST',body:{featureId:feature.id,title:'Review task',description:'Test protected review workflow',mode:'demo'}})).value.item;
+  assert.equal((await request(`/api/projects/${task.runId}/repo/publish`,{method:'POST',authorization:analyst})).status,403);
+  const publication=await request(`/api/projects/${task.runId}/repo/publish`,{method:'POST'});
+  assert.equal(publication.status,200);assert.equal(publication.value.project.publication.status,'failed');
+  assert.match(publication.value.project.publication.error,/تأیید انسانی/);
   const controller=new AbortController();const sse=await fetch(base+`/api/projects/${task.runId}/events`,{headers:{authorization:analyst},signal:controller.signal});assert.equal(sse.status,200);const reader=sse.body.getReader();assert.match(new TextDecoder().decode((await reader.read()).value),/connected/);
   await request(`/api/projects/${task.runId}/start`,{method:'POST'});assert.match(new TextDecoder().decode((await reader.read()).value),/update|progress/);controller.abort();await reader.cancel().catch(()=>{});
   let run=await reviewReady(task.runId,'analysis');
@@ -39,6 +43,15 @@ test('HTTP authentication, project isolation, assigned-role reviews, audit and S
   assert.equal((await request(`/api/projects/${task.runId}/tasks/analysis/review`,{method:'POST',authorization:analyst,body:{action:'approve',revisionId:run.tasks[0].revisions.at(-1).id,reviewer:'spoofed-admin'}})).status,200);
   run=await reviewReady(task.runId,'backend');assert.equal(run.tasks[0].reviews[0].reviewer,'analyst-test');
   const reconnect=new AbortController();const again=await fetch(base+`/api/projects/${task.runId}/events`,{headers:{authorization:analyst},signal:reconnect.signal});const reader2=again.body.getReader();assert.match(new TextDecoder().decode((await reader2.read()).value),/connected/);reconnect.abort();await reader2.cancel().catch(()=>{});
+  assert.equal((await request(`/api/portfolio/projects/${project.id}/tasks/bulk`,{method:'POST',authorization:analyst,body:{tasks:['Unauthorized']}})).status,403);
+  assert.equal((await request(`/api/portfolio/projects/${project.id}/tasks/bulk`,{method:'POST',body:{tasks:['No repository']}})).status,400);
+  assert.equal((await request(`/api/portfolio/projects/${project.id}/tasks/${task.id}`,{method:'DELETE',authorization:analyst})).status,403);
+  assert.equal((await request(`/api/portfolio/projects/${project.id}/tasks/${task.id}`,{method:'DELETE'})).status,200);
+  assert.equal((await request('/api/portfolio/trash')).value.projects.find(p=>p.id===project.id).phases[0].features[0].tasks[0].deletedAt!==undefined,true);
+  assert.equal((await request(`/api/portfolio/projects/${project.id}/tasks/${task.id}/restore`,{method:'POST'})).status,200);
+  assert.equal((await request(`/api/portfolio/projects/${privateProject.id}`,{method:'DELETE'})).status,200);
+  assert.equal((await request(`/api/portfolio/projects/${privateProject.id}/restore`,{method:'POST',authorization:analyst})).status,403);
+  assert.equal((await request(`/api/portfolio/projects/${privateProject.id}/restore`,{method:'POST'})).status,200);
   await sleep(50);const audit=(await fs.readFile(path.join(root,'audit.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);assert.ok(audit.some(e=>e.actor==='analyst-test'&&e.status===403));assert.ok(audit.some(e=>e.actor==='analyst-test'&&e.path.endsWith('/analysis/review')&&e.status===200));
  }finally{proc.kill('SIGTERM');await once(proc,'exit');await fs.rm(root,{recursive:true,force:true});}
 });

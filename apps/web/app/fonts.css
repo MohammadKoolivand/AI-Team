@@ -1,0 +1,57 @@
+/* Self-hosted fonts. Latin uses Poppins; Persian/Arabic glyphs use IRANSans. */
+@font-face {
+  font-family: 'Poppins';
+  src: url('/fonts/Poppins-Regular.ttf') format('truetype');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0000-024F, U+1E00-1EFF;
+}
+@font-face {
+  font-family: 'IRANSans';
+  src: url('/fonts/IRANSans-UltraLight.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 200;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-089F, U+08A0-08FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF;
+}
+@font-face {
+  font-family: 'IRANSans';
+  src: url('/fonts/IRANSans-Light.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 300;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-089F, U+08A0-08FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF;
+}
+@font-face {
+  font-family: 'IRANSans';
+  src: url('/fonts/IRANSans-Regular.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-089F, U+08A0-08FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF;
+}
+@font-face {
+  font-family: 'IRANSans';
+  src: url('/fonts/IRANSans-Medium.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-089F, U+08A0-08FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF;
+}
+@font-face {
+  font-family: 'IRANSans';
+  src: url('/fonts/IRANSans-Bold.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-089F, U+08A0-08FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF;
+}
+@font-face {
+  font-family: 'IRANSans';
+  src: url('/fonts/IRANSans-Black.woff2') format('woff2');
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+  unicode-range: U+0600-06FF, U+0750-077F, U+0870-089F, U+08A0-08FF, U+200C-200D, U+FB50-FDFF, U+FE70-FEFF;
+}

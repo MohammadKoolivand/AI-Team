@@ -1,0 +1,27 @@
+{
+  "name": "teamforge",
+  "version": "0.7.0-mvp",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:api": "node --env-file-if-exists=.env apps/server/server.mjs",
+    "dev:web": "npm run dev --workspace apps/web",
+    "test": "node --test apps/server/core/*.test.mjs",
+    "build": "npm run build --workspace apps/web",
+    "check:client": "node scripts/check-client-directives.mjs",
+    "sample:repo": "node scripts/create-sample-repo.mjs",
+    "start": "node scripts/dev.mjs --production",
+    "start:web": "npm run start --workspace apps/web",
+    "typecheck": "npm run lint --workspace apps/web",
+    "test:live": "node --env-file-if-exists=.env scripts/live-model-test.mjs",
+    "test:http": "node --test apps/server/core/http.test.mjs",
+    "auth:reset": "node --env-file-if-exists=.env scripts/reset-password.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

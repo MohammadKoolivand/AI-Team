@@ -1,0 +1,13 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import {durableJSON} from '../apps/server/core/durable.mjs';
+const username=process.argv[2]||process.env.TEAMFORGE_ADMIN_USER||'admin';
+const file=path.join(path.resolve(process.env.DATA_DIR||'./data'),'users.json');
+const users=JSON.parse(await fs.readFile(file,'utf8'));const user=users.find(u=>u.username===username);
+if(!user)throw Error('Account not found; start the API once to bootstrap an administrator');
+const password=process.env.TEAMFORGE_NEW_PASSWORD||crypto.randomBytes(24).toString('base64url');
+if(password.length<12||password.length>200)throw Error('Password must be 12–200 characters');
+user.salt=crypto.randomBytes(16).toString('hex');user.passwordHash=crypto.scryptSync(password,user.salt,64).toString('hex');
+await durableJSON(file,users);
+console.log(`Account: ${username}\nNew password: ${password}\nRestart the TeamForge API before signing in. Close old browser sessions if cached Basic credentials persist.`);

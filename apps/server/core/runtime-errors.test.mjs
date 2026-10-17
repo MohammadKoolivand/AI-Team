@@ -100,3 +100,22 @@ test('creating then deleting a source file cannot bypass the implementation gate
  try{process.env.OLLAMA_URL=`http://127.0.0.1:${server.address().port}`;await assert.rejects(runCodingAgent({project:{title:'Test',description:'Implement backend'},role:'backend',root}),{code:'NO_IMPLEMENTATION'});assert.equal(count,4);await assert.rejects(fs.readFile(path.join(root,'backend/temp.mjs')),{code:'ENOENT'});
  }finally{await new Promise(r=>server.close(r));if(oldURL===undefined)delete process.env.OLLAMA_URL;else process.env.OLLAMA_URL=oldURL;await fs.rm(root,{recursive:true,force:true});}
 });
+
+test('saved implementation checkpoints survive abort and resume without rewriting or losing the original diff',async()=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'teamforge-checkpoint-')),old=process.env.OLLAMA_URL,controller=new AbortController();let checkpoint=[],calls=0;
+ const server=http.createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;const payload=JSON.parse(raw);assert.ok(payload.format.oneOf.some(s=>s.properties.action.enum[0]==='apply_patch'&&s.properties.search.minLength===1));calls++;res.writeHead(200,{'Content-Type':'application/x-ndjson'});res.end(JSON.stringify({message:{content:JSON.stringify(calls===1?{action:'write_file',path:'backend/api.mjs',content:'export const ready=true;'}:{action:'finish',summary:'Resume saved implementation for review'})},done:true})+'\n');});await listen(server);
+ try{
+  process.env.OLLAMA_URL=`http://127.0.0.1:${server.address().port}`;
+  const project={title:'Resume',description:'Implement backend'};
+  await assert.rejects(runCodingAgent({project,role:'backend',root,signal:controller.signal,onCheckpoint:async changes=>{checkpoint=structuredClone(changes);controller.abort();}}),/abort/i);
+  assert.equal(checkpoint[0].before,null);assert.equal(await fs.readFile(path.join(root,'backend/api.mjs'),'utf8'),checkpoint[0].after);
+  const result=await runCodingAgent({project,role:'backend',root,initialChanges:checkpoint});assert.equal(result.finished,true);assert.equal(result.changes[0].before,null);assert.equal(result.changes[0].after,'export const ready=true;');assert.equal(calls,2);
+  await fs.writeFile(path.join(root,'backend/api.mjs'),'external modification');await assert.rejects(runCodingAgent({project,role:'backend',root,initialChanges:checkpoint}),/تغییر کرده/);assert.equal(calls,2);
+ }finally{server.closeAllConnections();await new Promise(r=>server.close(r));if(old===undefined)delete process.env.OLLAMA_URL;else process.env.OLLAMA_URL=old;await fs.rm(root,{recursive:true,force:true});}
+});
+
+test('identical repeated writes stop with saved progress instead of consuming the stage timeout',async()=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'teamforge-no-progress-')),old=process.env.OLLAMA_URL;let calls=0,checkpoint=[];
+ const server=http.createServer((req,res)=>{req.resume();calls++;res.writeHead(200,{'Content-Type':'application/x-ndjson'});res.end(JSON.stringify({message:{content:JSON.stringify({action:'write_file',path:'backend/api.mjs',content:'export const ready=true;'})},done:true})+'\n');});await listen(server);
+ try{process.env.OLLAMA_URL=`http://127.0.0.1:${server.address().port}`;await assert.rejects(runCodingAgent({project:{title:'Loop',description:'Implement backend'},role:'backend',root,onCheckpoint:async changes=>{checkpoint=changes;}}),e=>e.code==='AGENT_NO_PROGRESS');assert.equal(calls,3);assert.equal(checkpoint.length,1);}finally{server.closeAllConnections();await new Promise(r=>server.close(r));if(old===undefined)delete process.env.OLLAMA_URL;else process.env.OLLAMA_URL=old;await fs.rm(root,{recursive:true,force:true});}
+});

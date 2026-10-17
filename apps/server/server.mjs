@@ -144,6 +144,13 @@ async function handler(req,res){
   const id=m[1],sub=m[2]||'';
   if(!validUUID(id))return bad(res,400,'شناسه نامعتبر است.');
   const p=store.getProject(id);if(!p)return bad(res,404,'پروژه یافت نشد.');
+  if((req.method==='DELETE'&&!sub)||(req.method==='POST'&&sub==='restore')){
+   const item=p.organizationProjectId?portfolio.project(p.organizationProjectId).phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).find(t=>t.runId===id):null;
+   if(p.organizationProjectId&&!item)throw Error('Linked task not found');
+   if(req.method==='DELETE'){if(item)await portfolio.deleteItem(p.organizationProjectId,'tasks',item.id);else await engine.archive(id);}
+   else{if(item)await portfolio.restoreTask(p.organizationProjectId,item.id);else await engine.restore(id);}
+   return send(res,200,{ok:true});
+  }
   if(req.method==='GET'&&!sub)return send(res,200,{project:p});
   if(req.method==='POST'&&sub==='repo/import')return send(res,200,{project:await engine.importRepo(id,await body(req))});
   if(req.method==='POST'&&sub==='repo/publish')return send(res,200,{project:await engine.publish(id)});

@@ -62,9 +62,13 @@ export class Portfolio {
  }
  async addPhase(pid,{title,description='',priority='medium',status='planned',plannedOrder=0}){const p=this.project(pid);if(!['low','medium','high'].includes(priority)||!['planned','active','completed'].includes(status)||!Number.isInteger(plannedOrder)||plannedOrder<0)throw Error('Invalid phase metadata');const phase={id:uuid(),title:required(title,'عنوان فاز'),description:String(description).slice(0,5000),priority,status,plannedOrder,features:[]};await this.mutate(()=>p.phases.push(phase));return phase;}
  async addFeature(pid,{phaseId,title,description='',businessRequirements='',acceptanceCriteria=[],priority='medium'}){const p=this.project(pid);const phase=p.phases.find(x=>x.id===phaseId);if(!phase)throw Error('فاز پیدا نشد.');if(!['low','medium','high'].includes(priority)||!Array.isArray(acceptanceCriteria)||acceptanceCriteria.some(x=>typeof x!=='string'||x.length>1000))throw Error('Invalid feature metadata');const feat={id:uuid(),title:required(title,'عنوان فیچر'),description:String(description).slice(0,5000),businessRequirements:String(businessRequirements).slice(0,5000),acceptanceCriteria,priority,tasks:[]};await this.mutate(()=>phase.features.push(feat));return feat;}
- async addTask(pid,{featureId,title,description,priority='medium',mode='demo',runner='builtin',dependencies=[],acceptanceCriteria=[]}){
-  const p=this.project(pid);if(p.deletedAt)throw Error('Project deleted');const feat=p.phases.flatMap(x=>x.features).find(x=>x.id===featureId);
-  if(!feat)throw Error('فیچر پیدا نشد.');
+ async addTask(pid,input){
+  const previous=this.projectLocks.get(pid)||Promise.resolve();const op=previous.then(()=>this.addTaskLocked(pid,input));this.projectLocks.set(pid,op.catch(()=>{}));return op;
+ }
+ async addTaskLocked(pid,{featureId,title,description,priority='medium',mode='demo',runner='builtin',dependencies=[],acceptanceCriteria=[]}){
+  const p=this.project(pid);if(p.deletedAt)throw Error('Project deleted');const phase=p.phases[0]||{id:uuid(),title:'توسعه پروژه',features:[]};
+  const feat=featureId?p.phases.flatMap(x=>x.features).find(x=>x.id===featureId):(p.phases.flatMap(x=>x.features)[0]||{id:uuid(),title:'لیست کارها',tasks:[]});
+  if(!feat)throw Error('فیچر انتخاب‌شده پیدا نشد؛ گزینهٔ ساخت خودکار را انتخاب کنید.');
   if(!['low','medium','high'].includes(priority)||!['demo','ollama'].includes(mode)||!['builtin','codex_cli'].includes(runner))throw Error('تنظیمات تسک معتبر نیست.');
   const clean=required(title,'عنوان تسک'),desc=required(description,'شرح تسک',5000);
   const existing=p.phases.flatMap(ph=>ph.features.flatMap(f=>f.tasks)).filter(t=>!t.deletedAt);
@@ -82,7 +86,7 @@ export class Portfolio {
   }
   await this.store.mutate(run.id,x=>{x.organizationProjectId=pid;x.autoStart=mode==='ollama';x.queueManaged=p.queueMode==='sequential';x.dependsOnRuns=dependencies.map(id=>existing.find(t=>t.id===id).runId);x.acceptanceCriteria=acceptanceCriteria;x.filePolicy=p.filePolicy;x.assignedReviewers=Object.fromEntries(p.team.filter(m=>m.userId).map(m=>[m.role,m.userId]));});
   const t={id:uuid(),dependencies,acceptanceCriteria,title:clean,description:desc,priority,runId:run.id,mode,createdBy:'مدیر پروژه',createdAt:stamp()};
-  await this.mutate(()=>feat.tasks.push(t));
+  await this.mutate(()=>{if(p.deletedAt)throw Error('Project deleted');if(!p.phases.length)p.phases.push(phase);if(!p.phases.some(ph=>ph.features.some(f=>f.id===feat.id)))phase.features.push(feat);feat.tasks.push(t);});
   if(mode==='ollama'&&p.queueMode!=='sequential'&&dependencies.every(id=>this.store.getProject(existing.find(t=>t.id===id).runId)?.status==='completed')){
    try{await this.engine.start(run.id);}catch(e){await this.store.event(run.id,'system','error',`Start failed: ${String(e.message||e)}`);}
   }

@@ -35,3 +35,20 @@ test('bulk tasks form durable FIFO queue, wait for human stages and publication;
   await reloaded.restoreProject(p.id);assert.equal(reloaded.snapshot().length,1);assert.equal(reloaded.snapshot()[0].phases[0].features[0].tasks.length,2);
  }finally{if(oldRoots===undefined)delete process.env.TEAMFORGE_IMPORT_ROOTS;else process.env.TEAMFORGE_IMPORT_ROOTS=oldRoots;if(oldPublish===undefined)delete process.env.TEAMFORGE_AUTO_PUBLISH;else process.env.TEAMFORGE_AUTO_PUBLISH=oldPublish;await fs.rm(root,{recursive:true,force:true});}
 });
+
+test('single real task without feature creates default structure and preserves criteria, dependencies and FIFO',async()=>{
+ const root=await fs.mkdtemp(path.join(os.tmpdir(),'teamforge-single-task-')),previous=process.env.TEAMFORGE_IMPORT_ROOTS;
+ try{
+  process.env.TEAMFORGE_IMPORT_ROOTS=root;
+  const source=path.join(root,'source');await git(['init',source]);await git(['-C',source,'-c','user.name=Fixture','-c','user.email=f@example.invalid','commit','--allow-empty','-m','base']);
+  const store=new Store(path.join(root,'data'));await store.init();const engine=new Engine(store),board=new Portfolio(store.dataDir,store,engine);await board.init();
+  const p=await board.addProject({title:'New real project',queueMode:'sequential'});await board.attachRepository(p.id,{kind:'local',path:source});
+  await assert.rejects(board.addTask(p.id,{featureId:'',title:'Invalid',description:'',mode:'ollama'}));assert.equal(board.project(p.id).phases.length,0);
+  const spec={featureId:'',title:'Login screen',description:'Implement actual login API and screen',mode:'ollama',priority:'high',acceptanceCriteria:['RTL UI','Validate password']};
+  const [a,b]=await Promise.all([board.addTask(p.id,spec),board.addTask(p.id,{...spec,title:'Another screen'})]);
+  assert.equal(board.project(p.id).phases.length,1);assert.equal(board.project(p.id).phases[0].features.length,1);
+  const tasks=board.snapshot()[0].phases[0].features[0].tasks;assert.deepEqual(tasks.map(t=>t.id),[a.id,b.id]);
+  const run=store.getProject(a.runId);assert.equal(run.status,'draft');assert.equal(run.repository,null);assert.equal(run.autoStart,true);assert.equal(run.queueManaged,true);assert.deepEqual(run.acceptanceCriteria,spec.acceptanceCriteria);assert.equal(a.priority,'high');assert.equal(a.description,spec.description);
+  const c=await board.addTask(p.id,{...spec,title:'Dependent screen',dependencies:[a.id]});assert.deepEqual(store.getProject(c.runId).dependsOnRuns,[a.runId]);
+ }finally{if(previous===undefined)delete process.env.TEAMFORGE_IMPORT_ROOTS;else process.env.TEAMFORGE_IMPORT_ROOTS=previous;await fs.rm(root,{recursive:true,force:true});}
+});

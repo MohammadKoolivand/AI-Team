@@ -21,6 +21,11 @@ test('HTTP authentication, project isolation, assigned-role reviews, audit and S
   let ready=false;for(let i=0;i<100;i++){try{const r=await fetch(base+'/api/health');if(r.ok){ready=true;break;}}catch{}await sleep(30);}assert.equal(ready,true,log);
   assert.equal((await request('/api/portfolio',{authorization:''})).status,401);
   const project=(await request('/api/portfolio/projects',{method:'POST',body:{title:'Protected project'}})).value.project;
+  const fresh=(await request('/api/portfolio/projects',{method:'POST',body:{title:'Fresh without features',queueMode:'sequential'}})).value.project;
+  const freshTask=await request(`/api/portfolio/projects/${fresh.id}/tasks`,{method:'POST',body:{featureId:'',title:'First standalone task',description:'Implement login with validation',mode:'demo',priority:'high',acceptanceCriteria:['Validate input'],dependencies:[]}});
+  assert.equal(freshTask.status,201);assert.equal(freshTask.value.item.priority,'high');assert.deepEqual(freshTask.value.item.acceptanceCriteria,['Validate input']);
+  const freshSnapshot=(await request('/api/portfolio')).value.projects.find(p=>p.id===fresh.id);assert.equal(freshSnapshot.phases[0].features[0].tasks.length,1);
+  assert.equal((await request(`/api/portfolio/projects/${fresh.id}/tasks`,{method:'POST',body:{featureId:'unknown',title:'Invalid feature',description:'Do not create task'}})).status,400);
   const privateProject=(await request('/api/portfolio/projects',{method:'POST',body:{title:'Other private project'}})).value.project;
   const secret=crypto.randomBytes(18).toString('hex'),user=(await request('/api/users',{method:'POST',body:{username:'analyst-test',password:secret}})).value.user;
   const analyst='Basic '+Buffer.from(`analyst-test:${secret}`).toString('base64');
@@ -52,6 +57,13 @@ test('HTTP authentication, project isolation, assigned-role reviews, audit and S
   assert.equal((await request(`/api/portfolio/projects/${privateProject.id}`,{method:'DELETE'})).status,200);
   assert.equal((await request(`/api/portfolio/projects/${privateProject.id}/restore`,{method:'POST',authorization:analyst})).status,403);
   assert.equal((await request(`/api/portfolio/projects/${privateProject.id}/restore`,{method:'POST'})).status,200);
+  assert.equal((await request(`/api/projects/${task.runId}`,{method:'DELETE',authorization:analyst})).status,403);
+  assert.equal((await request(`/api/projects/${task.runId}`,{method:'DELETE'})).status,200);
+  assert.ok(!(await request('/api/projects')).value.projects.some(p=>p.id===task.runId));
+  assert.equal((await request(`/api/projects/${task.runId}/restore`,{method:'POST'})).status,200);
+  const standalone=(await request('/api/projects',{method:'POST',body:{title:'Standalone deletion',description:'Test deletion outside portfolio',mode:'demo'}})).value.project;
+  assert.equal((await request(`/api/projects/${standalone.id}`,{method:'DELETE'})).status,200);
+  assert.equal((await request(`/api/projects/${standalone.id}/restore`,{method:'POST'})).status,200);
   await sleep(50);const audit=(await fs.readFile(path.join(root,'audit.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);assert.ok(audit.some(e=>e.actor==='analyst-test'&&e.status===403));assert.ok(audit.some(e=>e.actor==='analyst-test'&&e.path.endsWith('/analysis/review')&&e.status===200));
  }finally{proc.kill('SIGTERM');await once(proc,'exit');await fs.rm(root,{recursive:true,force:true});}
 });

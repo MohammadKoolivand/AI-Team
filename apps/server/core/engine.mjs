@@ -218,7 +218,7 @@ export class Engine{
     const workspaceHash=await this.revisionHash(id);
     await this.store.mutate(id,x=>{
       const task=x.tasks.find(v=>v.id===taskId);
-      task.checks=[];task.revisions.push({id:crypto.randomUUID(),attempt:task.attempts,at:now(),source:'human',workspaceHash,summary:`ویرایش دستی توسط ${String(reviewer).slice(0,80)}`,changes:buildChanges({[filePath]:old},{[filePath]:content})});
+      task.checks=[];task.partialChanges=[];task.revisions.push({id:crypto.randomUUID(),attempt:task.attempts,at:now(),source:'human',workspaceHash,summary:`ویرایش دستی توسط ${String(reviewer).slice(0,80)}`,changes:buildChanges({[filePath]:old},{[filePath]:content})});
     });
     await this.store.event(id,t.agent,'file',`فایل ${filePath} توسط بازبین ویرایش شد.`);
     return this.store.getProject(id);
@@ -268,12 +268,13 @@ export class Engine{
       const workspaceHash=await this.revisionHash(id);
       await this.store.mutate(id,x=>{
         const task=x.tasks.find(v=>v.id===taskId);task.status='awaiting_review';task.output=[...new Set([...task.output,...output.files])];task.error=null;task.feedback='';task.finishedAt=now();
-        task.revisions.push({id:crypto.randomUUID(),attempt:task.attempts,at:now(),source:'agent',workspaceHash,summary:output.message,changes:output.changes,checks:output.checks||[],actions:output.actions||[],repairRuns:output.repairRuns||0});
+        task.partialChanges=[];task.revisions.push({id:crypto.randomUUID(),attempt:task.attempts,at:now(),source:'agent',workspaceHash,summary:output.message,changes:output.changes,checks:output.checks||[],actions:output.actions||[],repairRuns:output.repairRuns||0});
         if(output.quality)x.quality=output.quality;if(output.checks)task.checks=output.checks;
         x.status='awaiting_review';
       });
       await this.store.event(id,t.agent,'success',`خروجی «${t.title}» برای بازبینی انسانی آماده شد (${output.changes.length} فایل تغییرکرده).`);
     }catch(e){
+      if(e.name==='TimeoutError')e=Error('مهلت اجرای مرحله پایان یافت؛ فایل‌های ذخیره‌شده حفظ شده‌اند. برای ادامه از همین فایل‌ها، اجرای مجدد را بزنید.');
       const status=this.store.getProject(id)?.status;if(status==='cancelled')return;
       if(status==='paused'){await this.store.mutate(id,x=>{x.tasks.find(v=>v.id===taskId).status='pending';});return;}
       await this.store.mutate(id,x=>{const task=x.tasks.find(v=>v.id===taskId);task.status='failed';task.error=errorText(e);task.finishedAt=now();x.status='failed';});
@@ -298,7 +299,8 @@ export class Engine{
   async performRole(project,role,root,feedback){
     if(project.repository){
       const codingRuntime=project.runner==='codex_cli'?runCodexAgent:runCodingAgent;
-      const output=await codingRuntime({project,role,root,feedback,signal:this.controllers.get(project.id)?.signal,
+      const stage=project.tasks.find(t=>t.agent===role);
+      const output=await codingRuntime({project,role,root,feedback,initialChanges:stage?.partialChanges||[],onCheckpoint:changes=>this.store.mutate(project.id,x=>{const t=x.tasks.find(t=>t.agent===role);t.partialChanges=changes;}),signal:this.controllers.get(project.id)?.signal,
         onEvent:(kind,message)=>this.store.event(project.id,role,kind,message),
         onProgress:patch=>this.store.setProgress(project.id,role,patch)});
       if(['backend','frontend'].includes(role)&&!hasImplementationChanges(output.changes))throw Object.assign(Error('این مرحله هیچ تغییر اجرایی ایجاد نکرده است؛ برای تأیید آماده نیست.'),{code:'NO_IMPLEMENTATION'});
